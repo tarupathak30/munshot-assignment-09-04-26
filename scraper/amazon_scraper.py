@@ -143,7 +143,7 @@ class AmazonScraper:
             print("[REVIEW PAGE URL]", page.url)
 
             # Step 3: Grab reviews
-            review_blocks = page.locator("div[data-hook='review']")
+            review_blocks = page.locator("[data-hook='review']")
             count = review_blocks.count()
             print(f"[REVIEWS FOUND] {count}")
 
