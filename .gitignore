@@ -1,0 +1,63 @@
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# ----------------------------
+# Environment variables
+# ----------------------------
+.env
+
+# ----------------------------
+# Playwright / Browser stuff
+# ----------------------------
+auth.json   # 🔥 your Amazon login session (VERY IMPORTANT to ignore)
+
+# ----------------------------
+# Data files (generated)
+# ----------------------------
+data/raw/
+data/clean/
+data/sample/
+
+*.csv
+*.json
+
+# (optional: keep sample data if you want)
+# !data/sample/example.json
+
+# ----------------------------
+# Logs
+# ----------------------------
+*.log
+
+# ----------------------------
+# OS files
+# ----------------------------
+.DS_Store
+Thumbs.db
+
+# ----------------------------
+# IDE / Editor
+# ----------------------------
+.vscode/
+.idea/
+
+# ----------------------------
+# Streamlit cache
+# ----------------------------
+.streamlit/
+
+# ----------------------------
+# Jupyter notebooks (optional)
+# ----------------------------
+.ipynb_checkpoints/

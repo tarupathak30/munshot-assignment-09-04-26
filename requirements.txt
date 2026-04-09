@@ -1,0 +1,20 @@
+
+# Web Scraping
+playwright
+selenium
+
+# Data Processing
+pandas
+numpy
+
+# LLM / AI
+groq
+
+# Dashboard & Visualization
+streamlit
+plotly
+
+# Utilities
+python-dotenv
+requests
+tqdm
