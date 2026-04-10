@@ -20,7 +20,7 @@ env/
 # ----------------------------
 # Playwright / Browser stuff
 # ----------------------------
-auth.json   # 🔥 your Amazon login session (VERY IMPORTANT to ignore)
+auth.json  
 
 # ----------------------------
 # Data files (generated)

@@ -2,6 +2,7 @@ import time
 import random
 from playwright.sync_api import sync_playwright
 import re
+import json, os
 
 
 class AmazonScraper:
@@ -84,7 +85,7 @@ class AmazonScraper:
         review_count = self.extract_review_count(page)
 
         # sanity check
-        if review_count and review_count > 5000:
+        if review_count and review_count > 100000:
             print("[WARNING] Suspicious review count:", review_count)
 
         product = {
@@ -111,7 +112,7 @@ class AmazonScraper:
             print("[INFO] Attempting to load reviews natively...")
             
             # Step 1: Look for the "See all reviews" button on the product page
-            see_all_link = page.locator("a[data-hook='see-all-reviews-link-foot']")
+            see_all_link = page.locator("a[data-hook='see-all-reviews-link-foot']").first
             
             if see_all_link.count() > 0:
                 # Emulate a human click and wait for the page to load
@@ -195,9 +196,27 @@ class AmazonScraper:
         return all_products
 
 
+
+def save_raw(brand, data):
+    os.makedirs("data/raw", exist_ok=True)
+    path = f"data/raw/{brand.lower().replace(' ', '_')}.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"[SAVED] {len(data)} products → {path}")
+    
+
 if __name__ == "__main__":
-    scraper = AmazonScraper("Safari", max_products=3)
-    data = scraper.run()
+    brands = ["Safari", "Skybags", "American Tourister", "VIP"]
+    for brand in brands:
+        path = f"data/raw/{brand.lower().replace(' ', '_')}.json"
+        if os.path.exists(path):
+            print(f"[SKIP] {brand} already scraped at {path}")
+            continue                          # ← skip Safari, go straight to Skybags
+        scraper = AmazonScraper(brand, max_products=15, max_reviews=10)
+        data = scraper.run()
+        save_raw(brand, data)
+        print(f"[COOLDOWN] Waiting 2 min before next brand...")
+        time.sleep(120)
 
     from pprint import pprint
     pprint(data)

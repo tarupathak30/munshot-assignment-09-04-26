@@ -1,990 +1,315 @@
-"""
-Competitive Intelligence Dashboard
-Luggage Brands on Amazon India
-Pages: Overview | Brand Comparison | Product Drilldown | Agent Insights
-"""
-
-import json
-import os
-import sys
-import warnings
-from pathlib import Path
-
-warnings.filterwarnings("ignore")
-
-import numpy as np
+# dashboard/app.py
+import streamlit as st
 import pandas as pd
+import json
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
-# ─── Path Setup ───────────────────────────────────────────────────────────────
-PROJECT_DIR = Path(__file__).parent
-sys.path.insert(0, str(PROJECT_DIR))
+st.set_page_config(page_title="Luggage Intelligence Dashboard", layout="wide")
 
-DATA_DIR = PROJECT_DIR / "data" / "clean"
-RAW_DIR = PROJECT_DIR / "data" / "raw"
+# ── Load data ──────────────────────────────────────────────────────────────────
+@st.cache_data
+def load_data():
+    products  = pd.read_csv("data/clean/products_clean.csv")
+    reviews   = pd.read_csv("data/clean/reviews_clean.csv")
+    with open("data/clean/brand_analysis.json") as f:
+        brand_analysis = json.load(f)
+    with open("data/clean/insights.json") as f:
+        insights = json.load(f)
+    summary = pd.DataFrame([
+        {**{k: v for k, v in b.items()
+            if k not in ["top_pros","top_cons","aspect_scores","trust_flags"]},
+         "top_pros": b.get("top_pros", []),
+         "top_cons": b.get("top_cons", []),
+         "aspect_scores": b.get("aspect_scores", {}),
+         "trust_flags": b.get("trust_flags", []),
+        } for b in brand_analysis
+    ])
+    return products, reviews, brand_analysis, insights, summary
 
-FEATURED_CSV = DATA_DIR / "featured_dataset.csv"
-BRAND_ANALYSIS_JSON = DATA_DIR / "brand_analysis.json"
-INSIGHTS_JSON = DATA_DIR / "agent_insights.json"
-CLEAN_CSV = DATA_DIR / "products_clean.csv"
+products_df, reviews_df, brand_analysis, insights_data, summary_df = load_data()
 
-# ─── Page Config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Luggage Brand Intelligence",
-    page_icon="🧳",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ─── Custom CSS ───────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-  .main-header {
-    font-size: 2.2rem;
-    font-weight: 700;
-    color: #1a1a2e;
-    margin-bottom: 0.2rem;
-  }
-  .sub-header {
-    font-size: 1rem;
-    color: #666;
-    margin-bottom: 1.5rem;
-  }
-  .metric-card {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    padding: 1rem 1.2rem;
-    border-radius: 10px;
-    color: white;
-    text-align: center;
-  }
-  .metric-value {
-    font-size: 2rem;
-    font-weight: 700;
-  }
-  .metric-label {
-    font-size: 0.85rem;
-    opacity: 0.9;
-  }
-  .insight-card {
-    background: #f8f9ff;
-    border-left: 4px solid #667eea;
-    padding: 0.9rem 1.1rem;
-    border-radius: 0 8px 8px 0;
-    margin-bottom: 0.8rem;
-    font-size: 0.95rem;
-    color: #333;
-  }
-  .brand-badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    margin-right: 5px;
-  }
-  .stTabs [data-baseweb="tab-list"] {
-    gap: 1rem;
-  }
-  .stTabs [data-baseweb="tab"] {
-    font-size: 1rem;
-    font-weight: 600;
-    padding: 0.5rem 1rem;
-  }
-</style>
-""", unsafe_allow_html=True)
-
-# ─── Brand Colors ─────────────────────────────────────────────────────────────
 BRAND_COLORS = {
-    "Safari": "#FF6B6B",
-    "VIP": "#4ECDC4",
-    "Skybags": "#45B7D1",
-    "American Tourister": "#96CEB4",
+    "American Tourister": "#E05C2A",
+    "Safari":             "#2A7AE0",
+    "Skybags":            "#1DAB72",
+    "VIP":                "#C4830A",
 }
 
-# ─── Data Loading ─────────────────────────────────────────────────────────────
+# ── Sidebar filters ────────────────────────────────────────────────────────────
+st.sidebar.title("Filters")
+all_brands = sorted(products_df["brand"].unique().tolist())
+selected_brands = st.sidebar.multiselect("Brands", all_brands, default=all_brands)
 
-@st.cache_data(ttl=300)
-def load_data():
-    """Load all analysis data with caching."""
-    df = pd.DataFrame()
-    brand_analysis = {}
-    insights = []
+price_min, price_max = int(products_df["price"].dropna().min()), int(products_df["price"].dropna().max())
+price_range = st.sidebar.slider("Price range (₹)", price_min, price_max, (price_min, price_max))
 
-    # Load featured dataset (with sentiment)
-    if FEATURED_CSV.exists():
-        df = pd.read_csv(FEATURED_CSV)
-        # Parse JSON columns back to lists
-        for col in ["positive_themes", "negative_themes"]:
-            if col in df.columns:
-                df[col] = df[col].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) and x.startswith("[") else []
-                )
-    elif CLEAN_CSV.exists():
-        df = pd.read_csv(CLEAN_CSV)
-        df["sentiment_score"] = 0.65
-        df["value_score"] = 0.5
-        df["positive_themes"] = [[] for _ in range(len(df))]
-        df["negative_themes"] = [[] for _ in range(len(df))]
+min_rating = st.sidebar.selectbox("Min rating", [0.0, 3.5, 4.0, 4.2], index=0,
+                                   format_func=lambda x: f"{x}+" if x > 0 else "Any")
 
-    # Load brand analysis
-    if BRAND_ANALYSIS_JSON.exists():
-        with open(BRAND_ANALYSIS_JSON) as f:
-            brand_analysis = json.load(f)
+# Apply filters
+filtered_products = products_df[
+    (products_df["brand"].isin(selected_brands)) &
+    (products_df["price"].between(price_range[0], price_range[1], inclusive="both")) &
+    (products_df["rating"] >= min_rating) &
+    (~products_df["is_set"])
+]
+filtered_summary = summary_df[summary_df["brand"].isin(selected_brands)]
 
-    # Load insights
-    if INSIGHTS_JSON.exists():
-        with open(INSIGHTS_JSON) as f:
-            insights = json.load(f)
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.title("Luggage Competitive Intelligence")
+st.caption(f"Amazon India · {len(products_df)} products · {len(reviews_df)} reviews · Groq LLM analysis")
 
-    # Fill missing columns
-    for col in ["price_tier", "rating_tier", "sentiment_category"]:
-        if col not in df.columns:
-            df[col] = "Unknown"
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Overview", "Brand Comparison", "Products", "Sentiment", "Agent Insights"
+])
 
-    if "review_count_actual" not in df.columns and "review_count" in df.columns:
-        df["review_count_actual"] = df["review_count"] // 10
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — OVERVIEW
+# ══════════════════════════════════════════════════════════════════════════════
+with tab1:
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Brands tracked",    len(selected_brands))
+    c2.metric("Products analyzed", len(filtered_products))
+    c3.metric("Reviews processed", len(reviews_df[reviews_df["brand"].isin(selected_brands)]))
+    avg_sent = int(filtered_summary["sentiment_score"].mean()) if not filtered_summary.empty else 0
+    c4.metric("Avg sentiment",     f"{avg_sent}/100")
+    avg_disc = filtered_products["discount_pct"].mean()
+    c5.metric("Avg discount",      f"{avg_disc:.1f}%" if not pd.isna(avg_disc) else "N/A")
 
-    return df, brand_analysis, insights
-
-
-def get_filtered_df(df, brands=None, price_range=None, rating_range=None, sentiment_range=None):
-    """Apply sidebar filters to dataframe."""
-    filtered = df.copy()
-
-    if brands:
-        filtered = filtered[filtered["brand"].isin(brands)]
-
-    if price_range:
-        filtered = filtered[
-            (filtered["price"] >= price_range[0]) & (filtered["price"] <= price_range[1])
-        ]
-
-    if rating_range:
-        filtered = filtered[
-            (filtered["rating"] >= rating_range[0]) & (filtered["rating"] <= rating_range[1])
-        ]
-
-    if sentiment_range:
-        filtered = filtered[
-            (filtered["sentiment_score"] >= sentiment_range[0])
-            & (filtered["sentiment_score"] <= sentiment_range[1])
-        ]
-
-    return filtered
-
-
-# ─── Sidebar ─────────────────────────────────────────────────────────────────
-
-def render_sidebar(df):
-    """Render sidebar with filters."""
-    st.sidebar.markdown("## 🎛️ Filters")
-    st.sidebar.markdown("---")
-
-    all_brands = sorted(df["brand"].dropna().unique().tolist())
-    selected_brands = st.sidebar.multiselect(
-        "Brands",
-        options=all_brands,
-        default=all_brands,
-        help="Select one or more brands to filter",
-    )
-
-    st.sidebar.markdown("### Price Range (₹)")
-    min_price = int(df["price"].min())
-    max_price = int(df["price"].max())
-    price_range = st.sidebar.slider(
-        "Price Range",
-        min_value=min_price,
-        max_value=max_price,
-        value=(min_price, max_price),
-        step=100,
-        format="₹%d",
-        label_visibility="collapsed",
-    )
-
-    st.sidebar.markdown("### Rating")
-    rating_range = st.sidebar.slider(
-        "Rating Range",
-        min_value=1.0,
-        max_value=5.0,
-        value=(3.0, 5.0),
-        step=0.1,
-        format="%.1f ⭐",
-        label_visibility="collapsed",
-    )
-
-    st.sidebar.markdown("### Sentiment Score")
-    sentiment_range = st.sidebar.slider(
-        "Sentiment",
-        min_value=0.0,
-        max_value=1.0,
-        value=(0.0, 1.0),
-        step=0.05,
-        format="%.2f",
-        label_visibility="collapsed",
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 Data Status")
-
-    if FEATURED_CSV.exists():
-        st.sidebar.success("✅ Analysis complete")
-    elif CLEAN_CSV.exists():
-        st.sidebar.warning("⚠️ Analysis pending")
-    else:
-        st.sidebar.error("❌ No data found")
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**How to run analysis:**")
-    st.sidebar.code("python run_pipeline.py", language="bash")
-
-    return selected_brands, price_range, rating_range, sentiment_range
-
-
-# ─── Page 1: Overview ─────────────────────────────────────────────────────────
-
-def page_overview(df, brand_analysis, filtered_df):
-    st.markdown('<p class="main-header">🧳 Luggage Brand Intelligence Dashboard</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Competitive analysis of Amazon India\'s top luggage brands</p>', unsafe_allow_html=True)
-
-    # ── KPI Cards ──────────────────────────────────────────────────────────────
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    with col1:
-        st.metric("🏷️ Brands", filtered_df["brand"].nunique())
-    with col2:
-        st.metric("📦 Products", len(filtered_df))
-    with col3:
-        total_reviews = int(filtered_df["review_count"].sum()) if "review_count" in filtered_df.columns else 0
-        st.metric("💬 Reviews", f"{total_reviews:,}")
-    with col4:
-        avg_sentiment = filtered_df["sentiment_score"].mean() if "sentiment_score" in filtered_df.columns else 0
-        st.metric("😊 Avg Sentiment", f"{avg_sentiment:.2f}")
-    with col5:
-        avg_rating = filtered_df["rating"].mean() if "rating" in filtered_df.columns else 0
-        st.metric("⭐ Avg Rating", f"{avg_rating:.2f}")
-
-    st.markdown("---")
-
-    # ── Charts Row 1 ──────────────────────────────────────────────────────────
+    st.divider()
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.subheader("💰 Price Distribution by Brand")
-        if not filtered_df.empty:
-            fig_price = px.violin(
-                filtered_df,
-                x="brand",
-                y="price",
-                color="brand",
-                color_discrete_map=BRAND_COLORS,
-                box=True,
-                points="all",
-                labels={"price": "Price (₹)", "brand": "Brand"},
-                title="Price Distribution",
-            )
-            fig_price.update_layout(
-                showlegend=False,
-                height=380,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_price, use_container_width=True)
-
-    with col_right:
-        st.subheader("⭐ Rating Distribution")
-        if not filtered_df.empty:
-            fig_rating = px.histogram(
-                filtered_df,
-                x="rating",
-                color="brand",
-                color_discrete_map=BRAND_COLORS,
-                nbins=20,
-                labels={"rating": "Star Rating", "count": "Products"},
-                title="Rating Frequency",
-                barmode="overlay",
-                opacity=0.75,
-            )
-            fig_rating.update_layout(
-                height=380,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_rating, use_container_width=True)
-
-    # ── Charts Row 2 ──────────────────────────────────────────────────────────
-    col_l2, col_r2 = st.columns(2)
-
-    with col_l2:
-        st.subheader("🎯 Sentiment vs Rating Bubble Chart")
-        if not filtered_df.empty and "sentiment_score" in filtered_df.columns:
-            bubble_df = filtered_df.groupby("brand").agg(
-                avg_rating=("rating", "mean"),
-                avg_sentiment=("sentiment_score", "mean"),
-                avg_price=("price", "mean"),
-                product_count=("brand", "count"),
-            ).reset_index()
-
-            fig_bubble = px.scatter(
-                bubble_df,
-                x="avg_rating",
-                y="avg_sentiment",
-                size="product_count",
-                color="brand",
-                color_discrete_map=BRAND_COLORS,
-                text="brand",
-                labels={
-                    "avg_rating": "Avg Rating ⭐",
-                    "avg_sentiment": "Avg Sentiment Score",
-                },
-                title="Brand Position: Rating vs Sentiment",
-            )
-            fig_bubble.update_traces(textposition="top center")
-            fig_bubble.update_layout(
-                height=380,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_bubble, use_container_width=True)
-
-    with col_r2:
-        st.subheader("💸 Average Price vs Discount by Brand")
-        if not filtered_df.empty:
-            price_disc = filtered_df.groupby("brand").agg(
-                avg_price=("price", "mean"),
-                avg_discount=("discount_percentage", "mean"),
-            ).reset_index()
-
-            fig_pd = px.bar(
-                price_disc,
-                x="brand",
-                y=["avg_price", "avg_discount"],
-                barmode="group",
-                color_discrete_sequence=["#667eea", "#f9a825"],
-                labels={"value": "Value", "brand": "Brand", "variable": "Metric"},
-                title="Average Price (₹) vs Discount (%)",
-            )
-            fig_pd.update_layout(
-                height=380,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_pd, use_container_width=True)
-
-
-# ─── Page 2: Brand Comparison ─────────────────────────────────────────────────
-
-def page_brand_comparison(df, brand_analysis, filtered_df):
-    st.markdown("## 🏆 Brand Comparison")
-
-    if not brand_analysis:
-        st.warning("⚠️ Brand analysis data not available. Run the analysis pipeline first.")
-        _show_basic_brand_table(filtered_df)
-        return
-
-    # ── Summary Table ──────────────────────────────────────────────────────────
-    st.subheader("📊 Brand Metrics Overview")
-
-    table_data = []
-    for brand, data in brand_analysis.items():
-        if not filtered_df.empty and brand not in filtered_df["brand"].values:
-            continue
-        table_data.append({
-            "Brand": brand,
-            "Products": data.get("product_count", 0),
-            "Avg Price (₹)": f"₹{data.get('avg_price', 0):,.0f}",
-            "Avg Discount (%)": f"{data.get('avg_discount', 0):.1f}%",
-            "Avg Rating ⭐": f"{data.get('avg_rating', 0):.2f}",
-            "Avg Sentiment": f"{data.get('avg_sentiment', 0):.3f}",
-            "Total Reviews": f"{data.get('total_reviews', 0):,}",
-        })
-
-    if table_data:
-        table_df = pd.DataFrame(table_data)
-        st.dataframe(
-            table_df.set_index("Brand"),
-            use_container_width=True,
-            height=220,
-        )
-
-    st.markdown("---")
-
-    # ── Bar Charts ────────────────────────────────────────────────────────────
-    col1, col2 = st.columns(2)
-
-    brands_in_filter = filtered_df["brand"].unique().tolist() if not filtered_df.empty else list(brand_analysis.keys())
-
-    brand_df = pd.DataFrame([
-        {
-            "brand": brand,
-            "avg_price": data["avg_price"],
-            "avg_discount": data["avg_discount"],
-            "avg_rating": data["avg_rating"],
-            "avg_sentiment": data["avg_sentiment"],
-        }
-        for brand, data in brand_analysis.items()
-        if brand in brands_in_filter
-    ])
-
-    with col1:
-        st.subheader("💰 Average Price Comparison")
-        fig_price = px.bar(
-            brand_df.sort_values("avg_price"),
-            x="avg_price",
-            y="brand",
-            orientation="h",
-            color="brand",
-            color_discrete_map=BRAND_COLORS,
-            labels={"avg_price": "Average Price (₹)", "brand": ""},
-            text="avg_price",
-        )
-        fig_price.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside")
-        fig_price.update_layout(
-            showlegend=False,
-            height=320,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig_price, use_container_width=True)
-
-    with col2:
-        st.subheader("😊 Sentiment Score Comparison")
-        fig_sent = px.bar(
-            brand_df.sort_values("avg_sentiment"),
-            x="avg_sentiment",
-            y="brand",
-            orientation="h",
-            color="brand",
-            color_discrete_map=BRAND_COLORS,
-            labels={"avg_sentiment": "Avg Sentiment (0–1)", "brand": ""},
-            text="avg_sentiment",
-        )
-        fig_sent.update_traces(texttemplate="%{text:.3f}", textposition="outside")
-        fig_sent.update_layout(
-            showlegend=False,
-            height=320,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig_sent, use_container_width=True)
-
-    # ── Scatter Plot ──────────────────────────────────────────────────────────
-    st.subheader("🎯 Price vs Sentiment (Product Level)")
-
-    if not filtered_df.empty and "sentiment_score" in filtered_df.columns:
-        fig_scatter = px.scatter(
-            filtered_df,
-            x="price",
-            y="sentiment_score",
-            color="brand",
-            color_discrete_map=BRAND_COLORS,
-            size="rating",
-            hover_data=["product_name", "rating", "discount_percentage"],
-            labels={
-                "price": "Price (₹)",
-                "sentiment_score": "Sentiment Score",
-                "brand": "Brand",
-            },
-            title="Product Price vs Customer Sentiment (bubble size = rating)",
-        )
-        fig_scatter.update_layout(
-            height=420,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-    # ── Radar Chart ───────────────────────────────────────────────────────────
-    st.subheader("🕸️ Brand Radar: Multi-Metric Comparison")
-
-    if brand_df is not None and len(brand_df) > 0:
-        _render_radar_chart(brand_df)
-
-    # ── Themes Analysis ───────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("💬 Common Praises & Complaints by Brand")
-
-    cols = st.columns(len([b for b in brand_analysis if b in brands_in_filter]))
-    for i, (brand, data) in enumerate(brand_analysis.items()):
-        if brand not in brands_in_filter:
-            continue
-        with cols[i]:
-            color = BRAND_COLORS.get(brand, "#999")
-            st.markdown(f"**{brand}**")
-
-            praises = data.get("common_praises", [])
-            if praises:
-                st.markdown("👍 **Top Praises**")
-                for p in praises[:3]:
-                    st.markdown(f"• {p}")
-
-            complaints = data.get("common_complaints", [])
-            if complaints:
-                st.markdown("👎 **Top Complaints**")
-                for c in complaints[:3]:
-                    st.markdown(f"• {c}")
-
-
-def _render_radar_chart(brand_df):
-    """Render a radar/spider chart for brand metrics."""
-    # Normalize metrics to 0-1 for radar
-    metrics = ["avg_price", "avg_discount", "avg_rating", "avg_sentiment"]
-    labels = ["Price (inv)", "Discount", "Rating", "Sentiment"]
-
-    fig = go.Figure()
-
-    for _, row in brand_df.iterrows():
-        brand = row["brand"]
-        # Normalize each metric
-        values = []
-        for m in metrics:
-            col_min = brand_df[m].min()
-            col_max = brand_df[m].max()
-            col_range = col_max - col_min if col_max > col_min else 1
-            v = (row[m] - col_min) / col_range
-            if m == "avg_price":
-                v = 1 - v  # Invert: lower price = better score
-            values.append(round(v, 3))
-        values.append(values[0])  # Close the polygon
-
-        fig.add_trace(go.Scatterpolar(
-            r=values,
-            theta=labels + [labels[0]],
-            fill="toself",
-            name=brand,
-            line_color=BRAND_COLORS.get(brand, "#999"),
-            opacity=0.7,
-        ))
-
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-        showlegend=True,
-        height=400,
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _show_basic_brand_table(df):
-    if df.empty:
-        return
-    summary = df.groupby("brand").agg(
-        Products=("product_name", "count"),
-        Avg_Price=("price", "mean"),
-        Avg_Discount=("discount_percentage", "mean"),
-        Avg_Rating=("rating", "mean"),
-    ).round(2)
-    st.dataframe(summary, use_container_width=True)
-
-
-# ─── Page 3: Product Drilldown ─────────────────────────────────────────────────
-
-def page_product_drilldown(df, brand_analysis, filtered_df):
-    st.markdown("## 🔍 Product Drilldown")
-
-    if filtered_df.empty:
-        st.warning("No products match the current filters.")
-        return
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        available_brands = sorted(filtered_df["brand"].dropna().unique().tolist())
-        selected_brand = st.selectbox("Select Brand", available_brands)
-
-        brand_products = filtered_df[filtered_df["brand"] == selected_brand]
-        product_names = brand_products["product_name"].tolist()
-
-        selected_product_name = st.selectbox("Select Product", product_names)
-
-    product_row = brand_products[brand_products["product_name"] == selected_product_name]
-    if product_row.empty:
-        st.warning("Product not found.")
-        return
-
-    product = product_row.iloc[0]
-
-    with col2:
-        # Product Header
-        st.markdown(f"### {product['product_name']}")
-        badge_color = BRAND_COLORS.get(product["brand"], "#999")
-        st.markdown(
-            f'<span class="brand-badge" style="background:{badge_color};color:white">'
-            f'{product["brand"]}</span>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-
-    # ── Product Metrics ──────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5 = st.columns(5)
-
-    with m1:
-        st.metric("💰 Price", f"₹{product['price']:,.0f}")
-    with m2:
-        orig = product.get("original_price", product["price"])
-        st.metric("🏷️ MRP", f"₹{orig:,.0f}")
-    with m3:
-        disc = product.get("discount_percentage", 0)
-        st.metric("🎯 Discount", f"{disc:.1f}%")
-    with m4:
-        st.metric("⭐ Rating", f"{product['rating']:.1f}")
-    with m5:
-        sentiment = product.get("sentiment_score", 0)
-        st.metric("😊 Sentiment", f"{sentiment:.2f}")
-
-    # ── Themes ───────────────────────────────────────────────────────────────
-    col_pos, col_neg = st.columns(2)
-
-    with col_pos:
-        st.subheader("👍 Top Positive Themes")
-        themes = product.get("positive_themes", [])
-        if isinstance(themes, str):
-            try:
-                themes = json.loads(themes)
-            except Exception:
-                themes = []
-        if themes:
-            for t in themes[:5]:
-                st.markdown(f"✅ {t}")
-        else:
-            st.info("Run LLM analysis to see themes")
-
-    with col_neg:
-        st.subheader("👎 Top Negative Themes")
-        themes = product.get("negative_themes", [])
-        if isinstance(themes, str):
-            try:
-                themes = json.loads(themes)
-            except Exception:
-                themes = []
-        if themes:
-            for t in themes[:5]:
-                st.markdown(f"⚠️ {t}")
-        else:
-            st.info("Run LLM analysis to see themes")
-
-    # ── Value Assessment ──────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("📊 Product Position in Brand")
-
-    brand_products_all = df[df["brand"] == selected_brand].copy()
-
-    if len(brand_products_all) > 1:
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            # Price position
-            fig_price_pos = px.scatter(
-                brand_products_all,
-                x="price",
-                y="rating",
-                color="sentiment_score" if "sentiment_score" in brand_products_all.columns else None,
-                color_continuous_scale="RdYlGn",
-                hover_data=["product_name"],
-                title=f"{selected_brand}: Price vs Rating",
-                labels={"price": "Price (₹)", "rating": "Rating ⭐"},
-            )
-            # Highlight selected product
-            fig_price_pos.add_scatter(
-                x=[product["price"]],
-                y=[product["rating"]],
-                mode="markers",
-                marker=dict(size=16, color="red", symbol="star"),
-                name="Selected Product",
-                showlegend=True,
-            )
-            fig_price_pos.update_layout(
-                height=350,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_price_pos, use_container_width=True)
-
-        with col_b:
-            # Value score comparison
-            if "value_score" in brand_products_all.columns:
-                fig_value = px.bar(
-                    brand_products_all.sort_values("value_score", ascending=True).tail(8),
-                    x="value_score",
-                    y="product_name",
-                    orientation="h",
-                    color="value_score",
-                    color_continuous_scale="viridis",
-                    title=f"{selected_brand}: Value Scores",
-                    labels={"value_score": "Value Score", "product_name": ""},
-                )
-                fig_value.update_layout(
-                    height=350,
-                    showlegend=False,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    yaxis=dict(tickfont=dict(size=9)),
-                )
-                st.plotly_chart(fig_value, use_container_width=True)
-
-    # ── Reviews Sample ────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("💬 Review Text Preview")
-
-    review_text = product.get("review_text_combined", "")
-    if review_text and isinstance(review_text, str) and len(review_text) > 10:
-        reviews = [r.strip() for r in review_text.split("\n") if r.strip()][:10]
-        for i, rev in enumerate(reviews, 1):
-            st.markdown(f"**Review {i}:** {rev}")
-    else:
-        st.info("Review text not available. Run the full pipeline to see reviews.")
-
-
-# ─── Page 4: Agent Insights ────────────────────────────────────────────────────
-
-def page_agent_insights(df, brand_analysis, insights):
-    st.markdown("## 🤖 Agent Insights")
-    st.markdown(
-        "**AI-generated competitive intelligence insights** from automated analysis of "
-        "pricing, ratings, sentiment, and review themes across all brands."
-    )
-
-    if not insights:
-        st.warning(
-            "No insights available yet. Run the analysis pipeline with a Groq API key "
-            "to generate AI-powered insights.\n\n`python run_pipeline.py`"
-        )
-
-        # Show manually derived insights as placeholder
-        st.subheader("📌 Example Insight Categories")
-        examples = [
-            ("💰 Value Analysis", "Which brand offers the best sentiment-to-price ratio?"),
-            ("⭐ Rating vs Reality", "Do high star ratings always match review sentiment?"),
-            ("🔧 Quality Patterns", "What are the most common product failure points?"),
-            ("🏷️ Discount Strategy", "Is heavy discounting a quality signal?"),
-            ("📈 Market Position", "Where are the gaps in the competitive landscape?"),
-        ]
-        for icon_title, desc in examples:
-            st.markdown(f"**{icon_title}**: {desc}")
-        return
-
-    # ── Display Insights ────────────────────────────────────────────────────
-    st.subheader(f"💡 {len(insights)} Competitive Intelligence Findings")
-
-    icons = ["🥇", "🔍", "⚠️", "💡", "🎯"]
-    for i, insight in enumerate(insights):
-        icon = icons[i % len(icons)]
-        st.markdown(
-            f'<div class="insight-card">{icon} <b>Insight {i+1}:</b> {insight}</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Supporting Visualizations ────────────────────────────────────────────
-    if brand_analysis:
-        st.markdown("---")
-        st.subheader("📊 Supporting Data Visualizations")
-
-        col1, col2 = st.columns(2)
-
-        # Value Score Chart
-        with col1:
-            if "value_score" in df.columns:
-                value_by_brand = df.groupby("brand")["value_score"].mean().reset_index()
-                fig_val = px.bar(
-                    value_by_brand.sort_values("value_score"),
-                    x="brand",
-                    y="value_score",
-                    color="brand",
-                    color_discrete_map=BRAND_COLORS,
-                    title="Average Value Score by Brand",
-                    labels={"value_score": "Value Score (Sentiment/Price)", "brand": ""},
-                )
-                fig_val.update_layout(
-                    showlegend=False,
-                    height=320,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                )
-                st.plotly_chart(fig_val, use_container_width=True)
-
-        # Sentiment Distribution
-        with col2:
-            if "sentiment_score" in df.columns:
-                fig_hist = px.histogram(
-                    df,
-                    x="sentiment_score",
-                    color="brand",
-                    color_discrete_map=BRAND_COLORS,
-                    nbins=20,
-                    title="Sentiment Score Distribution",
-                    labels={"sentiment_score": "Sentiment Score", "count": "Products"},
-                    barmode="overlay",
-                    opacity=0.7,
-                )
-                fig_hist.update_layout(
-                    height=320,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                )
-                st.plotly_chart(fig_hist, use_container_width=True)
-
-        # Complaint Heatmap
-        st.subheader("🗺️ Top Complaints Heatmap")
-        _render_complaints_heatmap(brand_analysis)
-
-
-def _render_complaints_heatmap(brand_analysis):
-    """Create a heatmap of complaints across brands."""
-    all_complaints = set()
-    for data in brand_analysis.values():
-        all_complaints.update(data.get("common_complaints", [])[:5])
-
-    all_complaints = list(all_complaints)[:10]
-    brands = list(brand_analysis.keys())
-
-    matrix = []
-    for brand in brands:
-        brand_complaints = brand_analysis[brand].get("common_complaints", [])
-        row = [1 if c in brand_complaints else 0 for c in all_complaints]
-        matrix.append(row)
-
-    if matrix and all_complaints:
-        fig = go.Figure(
-            data=go.Heatmap(
-                z=matrix,
-                x=[c[:35] for c in all_complaints],
-                y=brands,
-                colorscale=[[0, "#e8f5e9"], [1, "#c62828"]],
-                showscale=False,
-                text=[["Present" if v else "" for v in row] for row in matrix],
-                texttemplate="%{text}",
-            )
-        )
-        fig.update_layout(
-            title="Complaint Presence by Brand (Red = Common Complaint)",
-            height=300,
-            xaxis_tickangle=-30,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-        )
+        st.subheader("Avg selling price by brand")
+        price_data = (filtered_products.groupby("brand")["price"]
+                      .mean().reset_index().sort_values("price", ascending=True))
+        fig = px.bar(price_data, x="price", y="brand", orientation="h",
+                     color="brand", color_discrete_map=BRAND_COLORS,
+                     labels={"price": "Avg price (₹)", "brand": ""},
+                     text=price_data["price"].apply(lambda x: f"₹{x:,.0f}"))
+        fig.update_traces(textposition="outside")
+        fig.update_layout(showlegend=False, height=300, margin=dict(l=0,r=20,t=10,b=0))
         st.plotly_chart(fig, use_container_width=True)
 
+    with col_right:
+        st.subheader("Avg discount % by brand")
+        disc_data = (filtered_products.groupby("brand")["discount_pct"]
+                     .mean().reset_index().sort_values("discount_pct", ascending=True))
+        fig2 = px.bar(disc_data, x="discount_pct", y="brand", orientation="h",
+                      color="brand", color_discrete_map=BRAND_COLORS,
+                      labels={"discount_pct": "Avg discount (%)", "brand": ""},
+                      text=disc_data["discount_pct"].apply(lambda x: f"{x:.1f}%"))
+        fig2.update_traces(textposition="outside")
+        fig2.update_layout(showlegend=False, height=300, margin=dict(l=0,r=20,t=10,b=0))
+        st.plotly_chart(fig2, use_container_width=True)
 
-# ─── Pipeline Runner UI ──────────────────────────────────────────────────────
+    st.subheader("Price vs sentiment positioning")
+    if not filtered_summary.empty:
+        fig3 = px.scatter(
+            filtered_summary, x="avg_price", y="sentiment_score",
+            size="total_reviews", color="brand",
+            color_discrete_map=BRAND_COLORS,
+            text="brand",
+            labels={"avg_price": "Avg price (₹)", "sentiment_score": "Sentiment score (0-100)"},
+            size_max=60,
+        )
+        fig3.update_traces(textposition="top center")
+        fig3.update_layout(showlegend=False, height=380)
+        st.plotly_chart(fig3, use_container_width=True)
+        st.caption("Bubble size = total review count. Top-right = high sentiment at higher price (premium justified). Top-left = high sentiment at low price (value winner).")
 
-def page_setup():
-    st.markdown("## ⚙️ Setup & Run Pipeline")
-    st.markdown("""
-    This page guides you through running the full data pipeline.
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — BRAND COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    sort_by = st.selectbox("Sort brands by",
+                           ["sentiment_score","avg_price","avg_discount_pct","avg_rating"],
+                           format_func=lambda x: x.replace("_"," ").title())
+    sorted_summary = filtered_summary.sort_values(sort_by, ascending=False)
 
-    ### 📋 Pipeline Steps:
-    1. **Generate/Scrape Data** – Either use sample data or run the Amazon scraper
-    2. **Clean Data** – Normalize and validate the dataset
-    3. **LLM Analysis** – Use Groq API for sentiment & themes
-    4. **Dashboard** – View insights here
+    # Brand cards
+    cols = st.columns(len(sorted_summary)) if len(sorted_summary) > 0 else st.columns(1)
+    for col, (_, row) in zip(cols, sorted_summary.iterrows()):
+        with col:
+            sent = row["sentiment_score"]
+            color = "#1DAB72" if sent >= 75 else "#C4830A" if sent >= 60 else "#E05C2A"
+            st.markdown(f"""
+            <div style="border:1px solid #ddd;border-radius:10px;padding:14px;text-align:center">
+              <div style="font-size:16px;font-weight:600">{row['brand']}</div>
+              <div style="font-size:28px;font-weight:700;color:{color};margin:6px 0">{sent}</div>
+              <div style="font-size:11px;color:#888">sentiment score</div>
+              <hr style="margin:8px 0">
+              <div style="font-size:13px">⭐ {row['avg_rating']:.2f} avg rating</div>
+              <div style="font-size:13px">₹{row['avg_price']:,.0f} avg price</div>
+              <div style="font-size:13px">{row['avg_discount_pct']:.1f}% avg discount</div>
+            </div>""", unsafe_allow_html=True)
 
-    ### 🚀 Quick Start (with sample data):
-    ```bash
-    # Install dependencies
-    pip install -r requirements.txt
+    st.divider()
+    st.subheader("Side-by-side benchmark")
 
-    # Generate sample data + run full pipeline
-    python run_pipeline.py --sample
+    table_rows = []
+    for _, row in sorted_summary.iterrows():
+        table_rows.append({
+            "Brand":        row["brand"],
+            "Avg price":    f"₹{row['avg_price']:,.0f}",
+            "Avg MRP":      f"₹{row['avg_mrp']:,.0f}",
+            "Discount":     f"{row['avg_discount_pct']:.1f}%",
+            "Rating":       f"{row['avg_rating']:.2f} ⭐",
+            "Total reviews":f"{int(row['total_reviews']):,}",
+            "Sentiment":    f"{row['sentiment_score']}/100",
+            "Positioning":  "Premium" if row['avg_price'] > 2800 else "Value",
+        })
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-    # Or with live scraping (requires playwright)
-    playwright install chromium
-    python run_pipeline.py --scrape
-    ```
-    """)
+    st.divider()
+    st.subheader("Pros & cons by brand")
+    for _, row in sorted_summary.iterrows():
+        with st.expander(f"{row['brand']} — sentiment {row['sentiment_score']}/100"):
+            lc, rc = st.columns(2)
+            with lc:
+                st.markdown("**Top praise themes**")
+                for p in row["top_pros"]:
+                    st.markdown(f"✅ {p}")
+            with rc:
+                st.markdown("**Top complaint themes**")
+                for c in row["top_cons"]:
+                    st.markdown(f"⚠️ {c}")
 
-    st.markdown("### 🔑 Groq API Key")
-    api_key = st.text_input("Enter Groq API Key (optional for demo)", type="password")
-    if api_key:
-        os.environ["GROQ_API_KEY"] = api_key
-        st.success("API key set for this session")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — PRODUCTS
+# ══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.subheader(f"Products ({len(filtered_products)} shown)")
 
-    st.markdown("### ▶️ Run Pipeline from Dashboard")
-    col1, col2, col3 = st.columns(3)
+    sort_col = st.selectbox("Sort by", ["price","rating","discount_pct","review_count"],
+                             format_func=lambda x: x.replace("_"," ").title())
+    sort_asc = st.checkbox("Ascending", value=False)
 
-    with col1:
-        if st.button("🎲 Generate Sample Data", use_container_width=True):
-            with st.spinner("Generating sample data..."):
-                try:
-                    from scraper.sample_data_generator import generate_all_sample_data
-                    generate_all_sample_data()
-                    st.success("✅ Sample data generated!")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+    display_df = (filtered_products[["brand","title","price","mrp","discount_pct",
+                                      "rating","review_count","url"]]
+                  .sort_values(sort_col, ascending=sort_asc)
+                  .copy())
 
-    with col2:
-        if st.button("🧹 Clean Data", use_container_width=True):
-            with st.spinner("Cleaning data..."):
-                try:
-                    from analysis.data_cleaner import clean_pipeline
-                    clean_pipeline()
-                    st.success("✅ Data cleaned!")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+    display_df["price"]        = display_df["price"].apply(lambda x: f"₹{x:,.0f}" if pd.notna(x) else "N/A")
+    display_df["mrp"]          = display_df["mrp"].apply(lambda x: f"₹{x:,.0f}" if pd.notna(x) else "N/A")
+    display_df["discount_pct"] = display_df["discount_pct"].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+    display_df["rating"]       = display_df["rating"].apply(lambda x: f"{x:.1f} ⭐" if pd.notna(x) else "N/A")
+    display_df["review_count"] = display_df["review_count"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
+    display_df.columns        = ["Brand","Title","Price","MRP","Discount","Rating","Reviews","URL"]
 
-    with col3:
-        if st.button("🤖 Run LLM Analysis", use_container_width=True):
-            if not os.environ.get("GROQ_API_KEY"):
-                st.error("⚠️ Set GROQ_API_KEY first!")
+    st.dataframe(display_df, use_container_width=True, hide_index=True,
+                 column_config={"URL": st.column_config.LinkColumn("Link")})
+
+    # Product drilldown
+    st.divider()
+    st.subheader("Product drilldown")
+    brand_sel = st.selectbox("Select brand", selected_brands, key="drillbrand")
+    brand_prods = filtered_products[filtered_products["brand"] == brand_sel]
+    if not brand_prods.empty:
+        prod_sel = st.selectbox("Select product",
+                                brand_prods["title"].tolist(), key="drillprod")
+        prod_row = brand_prods[brand_prods["title"] == prod_sel].iloc[0]
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        dc1.metric("Price",    f"₹{prod_row['price']:,.0f}" if pd.notna(prod_row['price']) else "N/A")
+        dc2.metric("MRP",      f"₹{prod_row['mrp']:,.0f}"   if pd.notna(prod_row['mrp'])   else "N/A")
+        dc3.metric("Discount", f"{prod_row['discount_pct']:.1f}%" if pd.notna(prod_row['discount_pct']) else "N/A")
+        dc4.metric("Rating",   f"{prod_row['rating']:.1f} ⭐" if pd.notna(prod_row['rating']) else "N/A")
+
+        prod_reviews = reviews_df[reviews_df["product_url"] == prod_row["url"]]
+        st.markdown(f"**Reviews scraped for this product:** {len(prod_reviews)}")
+        for _, r in prod_reviews.head(5).iterrows():
+            st.markdown(f"> {r['review_text'][:300]}...")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — SENTIMENT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("Aspect-level sentiment scores")
+    aspects = ["wheels","handle","material","zipper","size_space","durability","value_for_money"]
+
+    aspect_rows = []
+    for _, row in filtered_summary.iterrows():
+        scores = row.get("aspect_scores", {})
+        for asp in aspects:
+            aspect_rows.append({
+                "brand": row["brand"],
+                "aspect": asp.replace("_"," ").title(),
+                "score": scores.get(asp, 0)
+            })
+    aspect_df = pd.DataFrame(aspect_rows)
+
+    if not aspect_df.empty:
+        fig_asp = px.bar(
+            aspect_df, x="aspect", y="score", color="brand",
+            barmode="group", color_discrete_map=BRAND_COLORS,
+            labels={"score": "Score (0-100)", "aspect": ""},
+            range_y=[0, 100],
+        )
+        fig_asp.update_layout(height=400, legend_title="Brand")
+        st.plotly_chart(fig_asp, use_container_width=True)
+
+    st.divider()
+    st.subheader("Sentiment score by brand")
+    if not filtered_summary.empty:
+        fig_sent = px.bar(
+            filtered_summary.sort_values("sentiment_score"),
+            x="sentiment_score", y="brand", orientation="h",
+            color="brand", color_discrete_map=BRAND_COLORS,
+            labels={"sentiment_score": "Sentiment score (0-100)", "brand": ""},
+            text="sentiment_score", range_x=[0, 100],
+        )
+        fig_sent.update_traces(textposition="outside")
+        fig_sent.update_layout(showlegend=False, height=300)
+        st.plotly_chart(fig_sent, use_container_width=True)
+
+    st.divider()
+    st.subheader("Trust signals & anomalies")
+    for _, row in filtered_summary.iterrows():
+        flags = row.get("trust_flags", [])
+        anomaly = row.get("anomaly", "")
+        with st.expander(f"{row['brand']}"):
+            if flags:
+                for f in flags:
+                    st.warning(f"🚩 {f}")
             else:
-                with st.spinner("Running LLM analysis (this may take a few minutes)..."):
-                    try:
-                        from analysis.data_cleaner import load_clean_data_with_reviews
-                        from analysis.llm_analyzer import run_analysis_pipeline
-                        df = load_clean_data_with_reviews()
-                        run_analysis_pipeline(df)
-                        st.success("✅ Analysis complete!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                st.success("No suspicious patterns detected")
+            if anomaly:
+                st.info(f"💡 Anomaly: {anomaly}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — AGENT INSIGHTS
+# ══════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("Agent-generated competitive insights")
+    st.caption("Non-obvious conclusions derived from review synthesis + pricing data via Groq LLM")
 
-# ─── Main App ─────────────────────────────────────────────────────────────────
+    insights_list = insights_data.get("insights", [])
+    if insights_list:
+        for i, insight in enumerate(insights_list, 1):
+            with st.container():
+                st.markdown(f"**{i}. {insight['title']}**")
+                st.markdown(insight["detail"])
+                st.divider()
+    else:
+        st.info("No insights generated — re-run llm_analyzer.py")
 
-def main():
-    # Load data
-    df, brand_analysis, insights = load_data()
+    st.subheader("Value-for-money analysis")
+    if not filtered_summary.empty:
+        vfm_df = filtered_summary.copy()
+        # Score = sentiment per rupee (normalized)
+        vfm_df["vfm_score"] = (vfm_df["sentiment_score"] / vfm_df["avg_price"] * 1000).round(2)
+        vfm_df = vfm_df.sort_values("vfm_score", ascending=False)
 
-    # Sidebar filters
-    selected_brands, price_range, rating_range, sentiment_range = render_sidebar(df)
-
-    # Apply filters
-    filtered_df = get_filtered_df(
-        df,
-        brands=selected_brands,
-        price_range=price_range,
-        rating_range=rating_range,
-        sentiment_range=sentiment_range,
-    )
-
-    # Navigation tabs
-    tabs = st.tabs([
-        "📊 Overview",
-        "🏆 Brand Comparison",
-        "🔍 Product Drilldown",
-        "🤖 Agent Insights",
-        "⚙️ Setup",
-    ])
-
-    with tabs[0]:
-        page_overview(df, brand_analysis, filtered_df)
-
-    with tabs[1]:
-        page_brand_comparison(df, brand_analysis, filtered_df)
-
-    with tabs[2]:
-        page_product_drilldown(df, brand_analysis, filtered_df)
-
-    with tabs[3]:
-        page_agent_insights(df, brand_analysis, insights)
-
-    with tabs[4]:
-        page_setup()
-
-
-if __name__ == "__main__":
-    main()
+        fig_vfm = px.bar(
+            vfm_df, x="brand", y="vfm_score",
+            color="brand", color_discrete_map=BRAND_COLORS,
+            labels={"vfm_score": "Sentiment per ₹1000 spent", "brand": ""},
+            text="vfm_score",
+        )
+        fig_vfm.update_traces(textposition="outside")
+        fig_vfm.update_layout(showlegend=False, height=350)
+        st.plotly_chart(fig_vfm, use_container_width=True)
+        st.caption("Higher = more customer satisfaction per rupee spent. The true value-for-money winner.")
